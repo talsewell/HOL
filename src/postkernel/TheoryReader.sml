@@ -44,6 +44,7 @@ fun load_thydata thyname path =
     val _ = Theory.incorporate_consts thyname tyvector (#new_consts raw_data)
     val tmvector = build_term_vector idvector tyvector (#shared_terms raw_data)
     val named_thms = map (read_thm tmvector) (#theorems raw_data)
+
     val thmdict = Redblackmap.fromList String.compare named_thms
     val _ = DB.bindl thyname
                      (map (fn (n,c) => (n,Redblackmap.find (thmdict,n),c))
