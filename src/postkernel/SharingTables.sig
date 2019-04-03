@@ -28,15 +28,16 @@ sig
   val empty_termtable : termtable
 
   (* register the id/type/term vectors of a loaded theory. *)
-  type vectors = {ids : string Vector.vector,
-                  types : Type.hol_type Vector.vector,
-                  terms : Term.term Vector.vector}
+  type vectors = {ids : (string * shared_id) Vector.vector,
+                  types : (Type.hol_type * shared_type) Vector.vector,
+                  terms : (Term.term * shared_term) Vector.vector}
   val register_theory_vectors : string -> vectors -> unit
 
   (* set up tables to also share with previously loaded theories. *)
   type thy_name = string
-  val shared_tables : thy_name Vector.vector ->
-                      (idtable * typetable * termtable)
+  val setup_shared_tables : thy_name Vector.vector -> string list ->
+                            Type.hol_type list -> Term.term list ->
+                            (idtable * typetable * termtable)
 
   val make_shared_string : string -> idtable -> (int * idtable)
 

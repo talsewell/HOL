@@ -7,23 +7,34 @@ local open Feedback
 in val ERR = mk_HOL_ERR "SharingTables" end
 
 structure Map = Binarymap
-
-(* references into string/type/term vectors across theories. *)
-type theory_ref = {ThyId : int, Id : int}
+structure Set = Binaryset
 
 (* ----------------------------------------------------------------------
-    Per-Theory stored vectors
+    Shared Types and per-Theory stored vectors
    ---------------------------------------------------------------------- *)
-type vectors = {ids : string Vector.vector,
-                types : Type.hol_type Vector.vector,
-                terms : Term.term Vector.vector}
+type theory_ref = {ThyId : int, Id : int}
+type thy_name = string
+
+datatype shared_id = IDStr of string | IDRef of theory_ref
+datatype shared_type = TYV of string
+                     | TYOP of int list
+                     | TYRef of theory_ref
+datatype shared_term = TMV of string * int
+                     | TMC of int * int * int
+                     | TMAp of int * int
+                     | TMAbs of int * int
+                     | TMRef of theory_ref
+
+type vectors = {ids : (string * shared_id) Vector.vector,
+                types : (Type.hol_type * shared_type) Vector.vector,
+                terms : (Term.term * shared_term) Vector.vector,
+                parents : thy_name Vector.vector}
 type vv = vectors Vector.vector
 
 val thy_vectors = ref (Map.mkDict String.compare : (string, vectors) Map.dict)
 fun register_theory_vectors thy vs
   = (thy_vectors := Map.insert (! thy_vectors, thy, vs))
 
-type thy_name = string
 fun mk_vv (parents : thy_name Vector.vector) : vv = let
     val tv = ! thy_vectors
     fun find s = Map.find (tv, s) handle NotFound => raise ERR "mk_vv" s
@@ -36,7 +47,6 @@ fun lookup_vv (parents : vv) f (i : theory_ref) =
     IDs (strings)
    ---------------------------------------------------------------------- *)
 
-datatype shared_id = IDStr of string | IDRef of theory_ref
 type idtable = {idsize : int,
                 idmap : (string, (int * int option)) Map.dict,
                 idlist : shared_id list}
@@ -62,7 +72,7 @@ val empty_idtable : idtable = {idsize = 0,
 fun build_id_vector parent_thys sh_ids = let
   val parents = mk_vv parent_thys
   fun conv_id (IDStr s) = s
-    | conv_id (IDRef i) = lookup_vv parents (#ids) i
+    | conv_id (IDRef i) = #1 (lookup_vv parents (#ids) i)
   in Vector.fromList (map conv_id sh_ids) end
 
 val CB = PP.block PP.CONSISTENT 0
@@ -84,6 +94,28 @@ in
   ]
 end
 
+fun add_type_strings [] ss = ss
+  | add_type_strings (typ :: typs) ss = if is_vartype typ
+  then add_type_strings typs (Binaryset.add (ss, dest_vartype typ))
+  else let
+    val {Args, Thy, Tyop} = dest_thy_type typ
+    val ss = Binaryset.add (Binaryset.add (ss, Thy), Tyop)
+  in add_type_strings typs ss end
+
+fun add_term_strings [] ss = ss
+  | add_term_strings (t :: ts) ss = if is_comb t
+  then add_term_strings (rand t :: rator t :: ts) ss
+  else if is_abs t
+  then add_term_strings (#1 (dest_abs t) :: #2 (dest_abs t) :: ts) ss
+  else if is_var t
+  then add_term_strings ts (add_type_strings [type_of t]
+    (Binaryset.add (ss, #1 (dest_var t))))
+  else let
+    val {Name, Thy, Ty} = dest_thy_const t
+    val ss = add_type_strings [Ty]
+        (Binaryset.add (Binaryset.add (ss, Thy), Name))
+  in add_term_strings ts ss end
+
 fun add_thy_id thy_id (idn, s, tab : idtable) = let
     val {idsize, idmap, idlist} = tab
     val sh_id = (idn, SOME thy_id)
@@ -91,16 +123,15 @@ fun add_thy_id thy_id (idn, s, tab : idtable) = let
     {idsize = idsize, idmap = Map.insert (idmap, s, sh_id), idlist = idlist}
   end
 
-fun add_thy_ids thy_id idv idtable = Vector.foldri (add_thy_id thy_id)
-    idtable idv
+fun add_thy_ids thy_id ss idv idtable = let
+    fun f (idn, (_, IDStr s), tab) = if Set.member (ss, s)
+      then add_thy_id thy_id (idn, s, tab) else tab
+      | f (_, (_, IDRef _), tab) = tab
+  in Vector.foldri f idtable idv end
 
 (* ----------------------------------------------------------------------
     Types
    ---------------------------------------------------------------------- *)
-
-datatype shared_type = TYV of string
-                     | TYOP of int list
-                     | TYRef of theory_ref
 
 type typetable = {tysize : int,
                   tymap : (hol_type, (int * int option)) Map.dict,
@@ -155,7 +186,7 @@ fun build_type_vector parent_thys idv sh_tys = let
     | conv_ty (TYOP _) = raise ERR "conv_ty" "TYOP: not enough arguments"
     | conv_ty (TYRef i) = lookup_vv parents (#types) i
   val tys = Lib.mapi (fn n => fn x => let val ty = conv_ty x in
-    Array.update (ty_arr, n, ty); ty end) sh_tys
+    Array.update (ty_arr, n, ty); (ty, x) end) sh_tys
   in Vector.fromList tys end
 
 fun theoryout_typetable (tytable : typetable) = let
@@ -186,12 +217,6 @@ fun add_thy_tys thy_id tyv tab = Vector.foldri (add_thy_ty thy_id) tab tyv
 (* ----------------------------------------------------------------------
     Terms
    ---------------------------------------------------------------------- *)
-
-datatype shared_term = TMV of string * int
-                     | TMC of int * int * int
-                     | TMAp of int * int
-                     | TMAbs of int * int
-                     | TMRef of theory_ref
 
 (* sort terms by equality. Term.compare sorts alpha-equivalent terms equal. *)
 fun term_compare (t1, t2) = if is_abs t1 andalso is_abs t2
@@ -276,7 +301,7 @@ fun build_term_vector parent_thys idv tyv sh_tms = let
     | conv_tm (TMAbs (v_id, b_id)) = mk_abs (tm_sub v_id, tm_sub b_id)
     | conv_tm (TMRef i) = lookup_vv parents (#terms) i
   val tms = Lib.mapi (fn n => fn x => let val tm = conv_tm x in
-    Array.update (tm_arr, n, tm); tm end) sh_tms
+    Array.update (tm_arr, n, tm); (tm, x) end) sh_tms
   in Vector.fromList tms end
 
 fun theoryout_termtable (tmtable: termtable) =
