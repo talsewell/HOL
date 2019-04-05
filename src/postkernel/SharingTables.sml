@@ -6,7 +6,7 @@ open Term Type
 local open Feedback
 in val ERR = mk_HOL_ERR "SharingTables" end
 
-structure Map = Binarymap
+structure Map = Redblackmap
 structure Set = Binaryset
 
 (* ----------------------------------------------------------------------
@@ -16,10 +16,10 @@ type theory_ref = {ThyId : int, Id : int}
 type thy_name = string
 
 datatype shared_id = IDStr of string | IDRef of theory_ref
-datatype shared_type = TYV of string
+datatype shared_type = TYV of int
                      | TYOP of int list
                      | TYRef of theory_ref
-datatype shared_term = TMV of string * int
+datatype shared_term = TMV of int * int
                      | TMC of int * int * int
                      | TMAp of int * int
                      | TMAbs of int * int
@@ -51,7 +51,15 @@ type idtable = {idsize : int,
                 idmap : (string, (int * int option)) Map.dict,
                 idlist : shared_id list}
 
-fun make_shared_string (s : string) (idtable : idtable) =
+fun update_map_
+
+exception FoundID of int
+
+fun make_shared_string (premap : bool) (s : string) (idtable : idtable) = let
+    val {idsize, idmap, idlist} = idtable
+    fun f (SOME (~1, NONE)) = (idsize, NONE)
+      | f (SOME (i, NONE)) = raise (FoundID i)
+      | f (SOME 
     case Map.peek(#idmap idtable, s) of
       SOME (i, NONE) => (i, idtable)
     | v => let
@@ -116,18 +124,38 @@ fun add_term_strings [] ss = ss
         (Binaryset.add (Binaryset.add (ss, Thy), Name))
   in add_term_strings ts ss end
 
-fun add_thy_id thy_id (idn, s, tab : idtable) = let
+fun update_id_map f s (tab : idtable) = let
     val {idsize, idmap, idlist} = tab
-    val sh_id = (idn, SOME thy_id)
   in
-    {idsize = idsize, idmap = Map.insert (idmap, s, sh_id), idlist = idlist}
+    {idsize = idsize, idmap = Map.update (idmap, s, f), idlist = idlist}
   end
 
-fun add_thy_ids thy_id ss idv idtable = let
-    fun f (idn, (_, IDStr s), tab) = if Set.member (ss, s)
-      then add_thy_id thy_id (idn, s, tab) else tab
-      | f (_, (_, IDRef _), tab) = tab
-  in Vector.foldri f idtable idv end
+fun add_thy_id thy_id (idn, s, tab : idtable)
+    = update_id_map (fn _ => (idn, SOME thy_id)) s tab
+
+fun scan_add_wrapper (v : 'a Vector.vector) (adj : (int * 'a * 'b) -> bool * 'b)
+                     (scan : (arr * 'a) -> (bool * bool)) (acc : 'b)
+  = let
+    val arr = Array.array (Vector.length v, false)
+    fun f (i, x, acc) = let
+        val (is_ref, useful) = scan (arr, x)
+        val (res, acc) = if not is_ref andalso useful
+          then adj (i, x, acc) else (useful, acc)
+        val _ = if res then Array.update (arr, i, true) else ()
+      in acc end
+    val acc = Vector.foldri f acc v
+  in (arr, acc) end
+
+fun adj_premapped upd k v map = let
+    fun f NONE = raise Option
+      | f (SOME v) = if is_premapped v then v else raise Option
+  in (true, upd f k map) handle Option => (false, map) end
+
+fun share_vec_ids thy_id arrs (idv : idv) tab = let
+    fun scan (IDRef r) = (true, Array.sub (Vector.sub (arrs, #ThyId r), #Id r))
+      | scan (IDStr s) = (false, true)
+    fun adj (i, s, tab) = adj_premapped update_id_map s (i, SOME thy_id) tab
+  in scan_add_wrapper idv adj (scan o #2 o #2) tab end
 
 (* ----------------------------------------------------------------------
     Types
@@ -205,14 +233,34 @@ in
   ]
 end
 
-fun add_thy_ty thy_id (idn, ty, tab : typetable) = let
-    val {tysize, tymap, tylist} = tab
-    val sh_id = (idn, SOME thy_id)
+fun update_id_map f s (tab : idtable) = let
+    val {idsize, idmap, idlist} = tab
   in
-    {tysize = tysize, tymap = Map.insert (tymap, ty, sh_id), tylist = tylist}
+    {idsize = idsize, idmap = Map.update (idmap, s, f), idlist = idlist}
   end
 
-fun add_thy_tys thy_id tyv tab = Vector.foldri (add_thy_ty thy_id) tab tyv
+fun add_thy_id thy_id (idn, s, tab : idtable)
+    = update_id_map (fn _ => (idn, SOME thy_id)) s tab
+
+fun update_ty_map f ty (tab : typetable) = let
+    val {tysize, tymap, tylist} = tab
+  in
+    {tysize = tysize, tymap = Map.update (tymap, ty, f), tylist = tylist}
+  end
+
+fun add_thy_ty thy_id (idn, ty, tab : typetable)
+    = update_ty_map (fn _ => (idn, SOME thy_id)) ty tab
+
+fun share_vec_tys thy_id id_arr arrs (tyv : tyv) tab = let
+    fun ref r = Array.sub (Vector.sub (arrs, #ThyId r), #Id r)
+    fun scan (_, (_, TYRef r)) = (true, ref r)
+      | scan (_, (_, TYV i)) = (false, Array.sub (id_arr, i))
+      | scan (arr, (_, TYOp (thy_id :: nm_id :: args))) = (false,
+            Array.sub (id_arr, thy_id) andalso Array.sub (id_arr, nm_id)
+            andalso List.all (fn i => Array.sub (arr, i)) args)
+      | scan (arr, (_, TYOp _)) = raise ERR "scan" "TYOP: not enough arguments"
+    fun adj (i, ty, tab) = adj_premapped update_ty_map ty (i, SOME thy_id) tab
+  in scan_add_wrapper idv adj scan tab end
 
 (* ----------------------------------------------------------------------
     Terms
