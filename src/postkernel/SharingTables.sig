@@ -4,10 +4,10 @@ sig
   structure Map : Binarymap
   type theory_ref = {ThyId : int, Id : int}
   datatype shared_id = IDStr of string | IDRef of theory_ref
-  datatype shared_type = TYV of string
+  datatype shared_type = TYV of int
                        | TYOP of int list
                        | TYRef of theory_ref
-  datatype shared_term = TMV of string * int
+  datatype shared_term = TMV of int * int
                        | TMC of int * int * int
                        | TMAp of int * int
                        | TMAbs of int * int
@@ -31,11 +31,12 @@ sig
   type idv = (string * shared_id) Vector.vector
   type typev = (Type.hol_type * shared_type) Vector.vector
   type termv = (Term.term * shared_term) Vector.vector
-  type vectors = {ids : idv, types : typev, terms : termv}
+  type thy_name = string
+  type vectors = {ids : idv, types : typev, terms : termv,
+                  parents : thy_name Vector.vector}
   val register_theory_vectors : string -> vectors -> unit
 
   (* set up tables to also share with previously loaded theories. *)
-  type thy_name = string
   val setup_shared_tables : thy_name Vector.vector -> string list ->
                             Type.hol_type list -> Term.term list ->
                             (idtable * typetable * termtable)

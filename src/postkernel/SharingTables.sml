@@ -7,7 +7,7 @@ local open Feedback
 in val ERR = mk_HOL_ERR "SharingTables" end
 
 structure Map = Redblackmap
-structure Set = Binaryset
+structure Set = Redblackset
 
 (* ----------------------------------------------------------------------
     Shared Types and per-Theory stored vectors
@@ -25,9 +25,10 @@ datatype shared_term = TMV of int * int
                      | TMAbs of int * int
                      | TMRef of theory_ref
 
-type vectors = {ids : (string * shared_id) Vector.vector,
-                types : (Type.hol_type * shared_type) Vector.vector,
-                terms : (Term.term * shared_term) Vector.vector,
+type idv = (string * shared_id) Vector.vector
+type typev = (Type.hol_type * shared_type) Vector.vector
+type termv = (Term.term * shared_term) Vector.vector
+type vectors = {ids : idv, types : typev, terms : termv,
                 parents : thy_name Vector.vector}
 type vv = vectors Vector.vector
 
@@ -40,6 +41,8 @@ fun mk_vv (parents : thy_name Vector.vector) : vv = let
     fun find s = Map.find (tv, s) handle NotFound => raise ERR "mk_vv" s
   in Vector.map find parents end
 
+fun lookup_vectors thy_id = Map.find (! thy_vectors, thy_id)
+
 fun lookup_vv (parents : vv) f (i : theory_ref) =
     Vector.sub (f (Vector.sub (parents, #ThyId i)), #Id i)
 
@@ -50,16 +53,9 @@ fun lookup_vv (parents : vv) f (i : theory_ref) =
 type idtable = {idsize : int,
                 idmap : (string, (int * int option)) Map.dict,
                 idlist : shared_id list}
+type idv = (string * shared_id) Vector.vector
 
-fun update_map_
-
-exception FoundID of int
-
-fun make_shared_string (premap : bool) (s : string) (idtable : idtable) = let
-    val {idsize, idmap, idlist} = idtable
-    fun f (SOME (~1, NONE)) = (idsize, NONE)
-      | f (SOME (i, NONE)) = raise (FoundID i)
-      | f (SOME 
+fun make_shared_string (s : string) (idtable : idtable) =
     case Map.peek(#idmap idtable, s) of
       SOME (i, NONE) => (i, idtable)
     | v => let
@@ -81,7 +77,7 @@ fun build_id_vector parent_thys sh_ids = let
   val parents = mk_vv parent_thys
   fun conv_id (IDStr s) = s
     | conv_id (IDRef i) = #1 (lookup_vv parents (#ids) i)
-  in Vector.fromList (map conv_id sh_ids) end
+  in Vector.fromList (map (fn s => (conv_id s, s)) sh_ids) end
 
 val CB = PP.block PP.CONSISTENT 0
 val out = PP.add_string
@@ -102,60 +98,39 @@ in
   ]
 end
 
-fun add_type_strings [] ss = ss
-  | add_type_strings (typ :: typs) ss = if is_vartype typ
-  then add_type_strings typs (Binaryset.add (ss, dest_vartype typ))
-  else let
-    val {Args, Thy, Tyop} = dest_thy_type typ
-    val ss = Binaryset.add (Binaryset.add (ss, Thy), Tyop)
-  in add_type_strings typs ss end
-
-fun add_term_strings [] ss = ss
-  | add_term_strings (t :: ts) ss = if is_comb t
-  then add_term_strings (rand t :: rator t :: ts) ss
-  else if is_abs t
-  then add_term_strings (#1 (dest_abs t) :: #2 (dest_abs t) :: ts) ss
-  else if is_var t
-  then add_term_strings ts (add_type_strings [type_of t]
-    (Binaryset.add (ss, #1 (dest_var t))))
-  else let
-    val {Name, Thy, Ty} = dest_thy_const t
-    val ss = add_type_strings [Ty]
-        (Binaryset.add (Binaryset.add (ss, Thy), Name))
-  in add_term_strings ts ss end
+exception NoUpdate
 
 fun update_id_map f s (tab : idtable) = let
     val {idsize, idmap, idlist} = tab
   in
     {idsize = idsize, idmap = Map.update (idmap, s, f), idlist = idlist}
+      handle NoUpdate => tab
   end
 
-fun add_thy_id thy_id (idn, s, tab : idtable)
-    = update_id_map (fn _ => (idn, SOME thy_id)) s tab
+fun add_thy_id thy_id (idn, s) (tab : idtable)
+    = update_id_map (fn NONE => (idn, SOME thy_id) | SOME v => raise NoUpdate)
+        s tab
 
-fun scan_add_wrapper (v : 'a Vector.vector) (adj : (int * 'a * 'b) -> bool * 'b)
-                     (scan : (arr * 'a) -> (bool * bool)) (acc : 'b)
+fun scan_parent_wrapper (v : 'a Vector.vector)
+                        (f : bool Array.array * int * 'a * 'b -> bool * 'b)
+                        (acc : 'b)
   = let
     val arr = Array.array (Vector.length v, false)
-    fun f (i, x, acc) = let
-        val (is_ref, useful) = scan (arr, x)
-        val (res, acc) = if not is_ref andalso useful
-          then adj (i, x, acc) else (useful, acc)
-        val _ = if res then Array.update (arr, i, true) else ()
+    fun g (i, x, acc) = let
+        val (useful, acc) = f (arr, i, x, acc)
+        val _ = if useful then Array.update (arr, i, true) else ()
       in acc end
-    val acc = Vector.foldri f acc v
+    val acc = Vector.foldri g acc v
   in (arr, acc) end
 
-fun adj_premapped upd k v map = let
-    fun f NONE = raise Option
-      | f (SOME v) = if is_premapped v then v else raise Option
-  in (true, upd f k map) handle Option => (false, map) end
+fun if_upd b f x = (b, if b then f x else x)
 
-fun share_vec_ids thy_id arrs (idv : idv) tab = let
-    fun scan (IDRef r) = (true, Array.sub (Vector.sub (arrs, #ThyId r), #Id r))
-      | scan (IDStr s) = (false, true)
-    fun adj (i, s, tab) = adj_premapped update_id_map s (i, SOME thy_id) tab
-  in scan_add_wrapper idv adj (scan o #2 o #2) tab end
+fun share_parent_ids thy_id arrs ss (idv : idv) tab = let
+    fun arrs_ref r = Array.sub (Vector.sub (arrs, #ThyId r), #Id r)
+    fun f (_, _, (_, IDRef r), tab) = (arrs_ref r, tab)
+      | f (_, i, (s, IDStr _), tab) = if_upd (Set.member (ss, s))
+        (add_thy_id thy_id (i, s)) tab
+  in scan_parent_wrapper idv f tab end
 
 (* ----------------------------------------------------------------------
     Types
@@ -164,6 +139,7 @@ fun share_vec_ids thy_id arrs (idv : idv) tab = let
 type typetable = {tysize : int,
                   tymap : (hol_type, (int * int option)) Map.dict,
                   tylist : shared_type list}
+type typev = (Type.hol_type * shared_type) Vector.vector
 
 fun add_typetable ty sh_ty ({tysize, tymap, tylist} : typetable)
   = {tysize = tysize + 1,
@@ -177,8 +153,11 @@ fun make_shared_type ty idtable table =
         add_typetable ty (TYRef {ThyId = thy_id, Id = i}) table)
     | NONE => let
       in
-        if is_vartype ty then (#tysize table, idtable,
-            add_typetable ty (TYV (dest_vartype ty)) table)
+        if is_vartype ty then let
+            val (nm_id, idtable) = make_shared_string (dest_vartype ty) idtable
+          in
+            (#tysize table, idtable, add_typetable ty (TYV nm_id) table)
+	  end
         else let
             val {Thy, Tyop, Args} = dest_thy_type ty
             val (thy_id, idtable1) = make_shared_string Thy idtable
@@ -205,14 +184,14 @@ val default_type = Type.mk_vartype "'SharingTables_out_of_order"
 fun build_type_vector parent_thys idv sh_tys = let
   val parents = mk_vv parent_thys
   val ty_arr = Array.array (length sh_tys, default_type)
-  fun conv_ty (TYV s) = Type.mk_vartype s
+  fun conv_ty (TYV i) = Type.mk_vartype (Vector.sub (idv, i))
     | conv_ty (TYOP (thy_id :: nm_id :: args)) = let
         val thy = Vector.sub (idv, thy_id)
         val nm = Vector.sub (idv, nm_id)
         val arg_tys = map (Lib.curry Array.sub ty_arr) args
       in Type.mk_thy_type {Thy = thy, Tyop = nm, Args = arg_tys} end
     | conv_ty (TYOP _) = raise ERR "conv_ty" "TYOP: not enough arguments"
-    | conv_ty (TYRef i) = lookup_vv parents (#types) i
+    | conv_ty (TYRef i) = #1 (lookup_vv parents (#types) i)
   val tys = Lib.mapi (fn n => fn x => let val ty = conv_ty x in
     Array.update (ty_arr, n, ty); (ty, x) end) sh_tys
   in Vector.fromList tys end
@@ -220,7 +199,7 @@ fun build_type_vector parent_thys idv sh_tys = let
 fun theoryout_typetable (tytable : typetable) = let
   fun output_shtype shty =
       case shty of
-        TYV s => out ("TYV "^ Lib.mlquote s)
+        TYV i => out ("TYV "^ Lib.mlquote (Int.toString i))
       | TYOP args =>
         out ("TYOP "^ String.concatWith " " (map Int.toString args))
       | TYRef i => out ("TYRef " ^ pad_thy_ref " " i)
@@ -233,34 +212,37 @@ in
   ]
 end
 
-fun update_id_map f s (tab : idtable) = let
-    val {idsize, idmap, idlist} = tab
-  in
-    {idsize = idsize, idmap = Map.update (idmap, s, f), idlist = idlist}
-  end
-
-fun add_thy_id thy_id (idn, s, tab : idtable)
-    = update_id_map (fn _ => (idn, SOME thy_id)) s tab
-
 fun update_ty_map f ty (tab : typetable) = let
     val {tysize, tymap, tylist} = tab
   in
     {tysize = tysize, tymap = Map.update (tymap, ty, f), tylist = tylist}
+      handle NoUpdate => tab
   end
 
-fun add_thy_ty thy_id (idn, ty, tab : typetable)
-    = update_ty_map (fn _ => (idn, SOME thy_id)) ty tab
+fun add_thy_ty thy_id (idn, ty) (tab : typetable)
+    = update_ty_map (fn NONE => (idn, SOME thy_id) | SOME v => raise NoUpdate)
+        ty tab
 
-fun share_vec_tys thy_id id_arr arrs (tyv : tyv) tab = let
-    fun ref r = Array.sub (Vector.sub (arrs, #ThyId r), #Id r)
-    fun scan (_, (_, TYRef r)) = (true, ref r)
-      | scan (_, (_, TYV i)) = (false, Array.sub (id_arr, i))
-      | scan (arr, (_, TYOp (thy_id :: nm_id :: args))) = (false,
-            Array.sub (id_arr, thy_id) andalso Array.sub (id_arr, nm_id)
-            andalso List.all (fn i => Array.sub (arr, i)) args)
-      | scan (arr, (_, TYOp _)) = raise ERR "scan" "TYOP: not enough arguments"
-    fun adj (i, ty, tab) = adj_premapped update_ty_map ty (i, SOME thy_id) tab
-  in scan_add_wrapper idv adj scan tab end
+fun share_parent_tys thy_id id_arr arrs tys (typev : typev) tab = let
+    fun arrs_ref r = Array.sub (Vector.sub (arrs, #ThyId r), #Id r)
+    fun ifu rs idn ty = if_upd
+        (List.all Array.sub rs andalso Set.member (tys, ty))
+        (add_thy_ty thy_id (idn, ty))
+    fun f (_, _, (_, TYRef r), tab) = (arrs_ref r, tab)
+      | f (_, idn, (ty, TYV i), tab) = ifu [(id_arr, i)] idn ty tab
+      | f (arr, idn, (ty, TYOP (thy_id :: nm_id :: args)), tab) = ifu
+            ([(id_arr, thy_id), (id_arr, nm_id)] @ map (pair arr) args)
+            idn ty tab
+      | f (_, _, (_, TYOP _), _) = raise ERR "scan" "TYOP: not enough arguments"
+  in scan_parent_wrapper typev f tab end
+
+fun add_types [] (tyset, ss) = (tyset, ss)
+  | add_types (typ :: typs) (tyset, ss) = if is_vartype typ
+  then add_types typs (Set.add (tyset, typ), Set.add (ss, dest_vartype typ))
+  else let
+    val {Args, Thy, Tyop} = dest_thy_type typ
+    val ss = Set.add (Set.add (ss, Thy), Tyop)
+  in add_types (Args @ typs) (Set.add (tyset, typ), ss) end
 
 (* ----------------------------------------------------------------------
     Terms
@@ -294,11 +276,11 @@ fun make_shared_term tm (tables as (idtable,tytable,tmtable)) =
       in
         if is_var tm then let
             val (s, ty) = dest_var tm
-            val (ty_i, idtable, tytable) =
-                make_shared_type ty idtable tytable
+            val (ty_i, idtable, tytable) = make_shared_type ty idtable tytable
+            val (s_i, idtable) = make_shared_string s idtable
           in
             (#termsize tmtable, (idtable, tytable,
-                                 add_termtable tm (TMV (s, ty_i)) tmtable))
+                                 add_termtable tm (TMV (s_i, ty_i)) tmtable))
           end
         else if is_const tm then let
             val {Thy,Name,Ty} = dest_thy_const tm
@@ -339,7 +321,8 @@ fun build_term_vector parent_thys idv tyv sh_tms = let
   val parents = mk_vv parent_thys
   val tm_arr = Array.array (length sh_tms, default_term)
   val tm_sub = Lib.curry Array.sub tm_arr
-  fun conv_tm (TMV (s, ty_id)) = mk_var (s, Vector.sub (tyv, ty_id))
+  fun conv_tm (TMV (s_id, ty_id)) = mk_var (Vector.sub (idv, s_id),
+          Vector.sub (tyv, ty_id))
     | conv_tm (TMC (thy_id, nm_id, ty_id)) = let
         val thy = Vector.sub (idv, thy_id)
         val nm = Vector.sub (idv, nm_id)
@@ -347,7 +330,7 @@ fun build_term_vector parent_thys idv tyv sh_tms = let
       in mk_thy_const {Name = nm, Thy = thy, Ty = ty} end
     | conv_tm (TMAp (f_id, x_id)) = mk_comb (tm_sub f_id, tm_sub x_id)
     | conv_tm (TMAbs (v_id, b_id)) = mk_abs (tm_sub v_id, tm_sub b_id)
-    | conv_tm (TMRef i) = lookup_vv parents (#terms) i
+    | conv_tm (TMRef i) = #1 (lookup_vv parents (#terms) i)
   val tms = Lib.mapi (fn n => fn x => let val tm = conv_tm x in
     Array.update (tm_arr, n, tm); (tm, x) end) sh_tms
   in Vector.fromList tms end
@@ -357,8 +340,8 @@ fun theoryout_termtable (tmtable: termtable) =
     val pad_ints = String.concatWith " " o map Int.toString
     fun output_shtm shtm =
       case shtm of
-          TMV (s, tyn) =>
-            out ("TMV " ^ Lib.mlquote s ^" "^Int.toString tyn)
+          TMV (i, tyn) =>
+            out ("TMV " ^ Lib.mlquote (Int.toString i) ^" "^Int.toString tyn)
         | TMC (x, y, z) => out ("TMC "^pad_ints [x, y, z])
         | TMAp (x, y) => out ("TMAp "^pad_ints [x, y])
         | TMAbs (x, y) => out ("TMAbs "^pad_ints [x, y])
@@ -372,24 +355,81 @@ fun theoryout_termtable (tmtable: termtable) =
     ]
   end
 
-fun add_thy_tm thy_id (idn, tm, tab : termtable) = let
+fun update_tm_map f tm (tab : termtable) = let
     val {termsize, termmap, termlist} = tab
-    val sh_id = (idn, SOME thy_id)
   in
-    {termsize = termsize, termmap = Map.insert (termmap, tm, sh_id),
+    {termsize = termsize, termmap = Map.update (termmap, tm, f),
      termlist = termlist}
+    handle NoUpdate => tab
   end
 
-fun add_thy_tms thy_id tmv tab = Vector.foldri (add_thy_tm thy_id) tab tmv
+fun add_thy_tm thy_id (idn, tm) (tab : termtable)
+    = update_tm_map (fn NONE => (idn, SOME thy_id) | SOME v => raise NoUpdate)
+        tm tab
 
-fun shared_tables parent_thys = let
-  val parents = mk_vv parent_thys
-  val ids = Vector.foldri (fn (i, vs, ids) => add_thy_ids i (#ids vs) ids)
-    empty_idtable parents
-  val tys = Vector.foldri (fn (i, vs, tys) => add_thy_tys i (#types vs) tys)
-    empty_tytable parents
-  val terms = Vector.foldri (fn (i, vs, tms) => add_thy_tms i (#terms vs) tms)
-    empty_termtable parents
-  in (ids, tys, terms) end
+fun share_parent_tms thy_id id_arr ty_arr arrs tms (termv : termv) tab = let
+    fun arrs_ref r = Array.sub (Vector.sub (arrs, #ThyId r), #Id r)
+    fun ifu rs idn tm = if_upd
+        (List.all Array.sub rs andalso Set.member (tms, tm))
+        (add_thy_tm thy_id (idn, tm))
+    fun f (_, _, (_, TMRef r), tab) = (arrs_ref r, tab)
+      | f (_, idn, (tm, TMV (i, j)), tab) = ifu [(id_arr, i), (ty_arr, j)]
+                idn tm tab
+      | f (_, idn, (tm, TMC (i, j, k)), tab) = ifu [(id_arr, i), (id_arr, j),
+                (ty_arr, k)] idn tm tab
+      | f (arr, idn, (tm, TMAp (i, j)), tab) = ifu [(arr, i), (arr, j)]
+                idn tm tab
+      | f (arr, idn, (tm, TMAbs (i, j)), tab) = ifu [(arr, i), (arr, j)]
+                idn tm tab
+  in scan_parent_wrapper termv f tab end
+
+fun add_terms [] (tmset, tyset, ss) = (tmset, tyset, ss)
+  | add_terms (tm :: tms) (tmset, tyset, ss) = if is_var tm
+  then let
+    val (nm, ty) = dest_var tm
+    val (tyset, ss) = add_types [ty] (tyset, ss)
+  in add_terms tms (Set.add (tmset, tm), tyset, ss) end
+  else if is_const tm
+  then let
+    val {Name, Thy, Ty} = dest_thy_const tm
+    val ss = Set.add (Set.add (ss, Thy), Name)
+    val (tyset, ss) = add_types [Ty] (tyset, ss)
+  in add_terms tms (Set.add (tmset, tm), tyset, ss) end
+  else let
+    val (x, y) = if is_comb tm then dest_comb tm else dest_abs tm
+  in add_terms (x :: y :: tms) (tmset, tyset, ss) end
+
+fun vec_to_list v = Vector.foldr (op ::) [] v
+
+fun setup_shared_tables parent_thys ss tys tms = let
+    val ss = Set.fromList String.compare ss
+    val (tyset, ss) = add_types tys (Set.empty Type.compare, ss)
+    val (tmset, tyset, ss) = add_terms tms (Set.empty term_compare, tyset, ss)
+    val parents = vec_to_list parent_thys
+    val thy_ids = Map.fromList String.compare
+        (Lib.mapi (fn i => fn s => (s, i)) parents)
+    fun doit ((arrs, tabs), (thy_id : thy_name)) = case Map.peek (arrs, thy_id) of
+        SOME arr_tup => ((arrs, tabs), arr_tup)
+      | NONE => let
+        val vectors = lookup_vectors thy_id
+        val ((arrs, tabs), arr_tup_list)
+            = Lib.foldl_map doit ((arrs, tabs), vec_to_list (#parents vectors))
+        val thy_id_n = Map.find (thy_ids, thy_id)
+        val (id_tab, ty_tab, tm_tab) = tabs
+        val (id_arr, id_tab) = share_parent_ids thy_id_n
+            (Vector.fromList (map #1 arr_tup_list)) ss (#ids vectors) id_tab
+        val (ty_arr, ty_tab) = share_parent_tys thy_id_n id_arr
+            (Vector.fromList (map #2 arr_tup_list)) tyset (#types vectors)
+            ty_tab
+        val (tm_arr, tm_tab) = share_parent_tms thy_id_n id_arr ty_arr
+            (Vector.fromList (map #3 arr_tup_list)) tmset (#terms vectors)
+            tm_tab
+        val arr_tup = (id_arr, ty_arr, tm_arr)
+        val arrs = Map.insert (arrs, thy_id, arr_tup)
+      in ((arrs, (id_tab, ty_tab, tm_tab)), arr_tup) end
+    val tabs = (empty_idtable, empty_tytable, empty_termtable)
+    val arrs = Map.mkDict String.compare
+    val ((_, tabs), _) = Lib.foldl_map doit ((arrs, tabs), parents)
+  in tabs end
 
 end; (* struct *)
