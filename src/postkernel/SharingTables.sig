@@ -1,7 +1,7 @@
 signature SharingTables =
 sig
 
-  structure Map : Binarymap
+  structure Map : Redblackmap
   type theory_ref = {ThyId : int, Id : int}
   datatype shared_id = IDStr of string | IDRef of theory_ref
   datatype shared_type = TYV of int
@@ -53,14 +53,13 @@ sig
 
   val theoryout_idtable : idtable PP.pprinter
 
-  val build_type_vector : thy_name Vector.vector -> string Vector.vector ->
+  val build_type_vector : thy_name Vector.vector -> idv ->
                           shared_type list -> typev
 
   val theoryout_typetable : typetable PP.pprinter
 
-  val build_term_vector : thy_name Vector.vector -> string Vector.vector ->
-                          Type.hol_type Vector.vector -> shared_term list ->
-                          termv
+  val build_term_vector : thy_name Vector.vector -> idv -> typev ->
+                          shared_term list -> termv
 
   val theoryout_termtable : termtable PP.pprinter
 

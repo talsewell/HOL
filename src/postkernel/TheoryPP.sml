@@ -310,38 +310,22 @@ fun pp_thydata info_record = let
     |> Vector.fromList
   val thml = axioms@definitions@theorems
   open SharingTables
-  val enc_tabs = ref (shared_tables share_parents)
-  fun enc_s s = let
-      val (idtable, tytable, tmtable) = ! enc_tabs
-      val (s_id, idtable) = make_shared_string s idtable
-    in enc_tabs := (idtable, tytable, tmtable); s_id end
-  fun enc_ty_tm (ty, tm) = let
-      val (idtable, tytable, tmtable) = ! enc_tabs
-      val (ty_id, idtable, tytable) = make_shared_type ty idtable tytable
-      val (tm_id, tabs) = make_shared_term tm (idtable, tytable, tmtable)
-    in enc_tabs := tabs; (ty_id, tm_id) end
-  fun enc_ty ty = fst (enc_ty_tm (ty, Term.mk_var ("x", ty)))
-  fun enc_tm tm = snd (enc_ty_tm (Term.type_of tm, tm))
 
-  val type_ids = map (apfst enc_s) types
-
-  val constant_ids = map (fn (s, ty) => (enc_s s, enc_ty ty)) constants
-
-  val thm_ids = C map thml (fn (s, thm) => let
-        val tms = Thm.concl thm :: Thm.hyp thm
-      in (s, Thm.tag thm, map enc_tm tms) end)
-
-  val thydata_strings = Binarymap.listItems thydata
-    |> map (fn (s, writer) => (s, writer (Int.toString o enc_tm)))
-
-  val (idtable, tytable, tmtable) = ! enc_tabs
+  val ss = map fst types @ map fst constants
+  val tys = map snd constants
+  fun thm_tms thm = Thm.concl thm :: Thm.hyp thm
+  val tms = thydata_tms @ List.concat (map (thm_tms o #2) thml)
+  val (idtable, tytable, tmtable) = setup_shared_tables share_parents ss tys tms
 
   val jump = add_newline >> add_newline
-
-  fun pp_ty_dec (s_id, arity) =
-      add_string (Int.toString s_id ^ " " ^ Int.toString arity)
-  fun pp_const_dec (s_id, ty_id) =
-      add_string (Int.toString s_id ^ " " ^ Int.toString ty_id)
+  fun string_id s = Int.toString (#1 (Map.find(#idmap idtable, s)))
+    handle NotFound => raise ERR "string_id" s
+  fun pp_ty_dec (s,n) =
+      add_string (string_id s ^ " " ^ Int.toString n)
+  fun pp_const_dec (s, ty) =
+      add_string (string_id s ^ " " ^
+                  Int.toString (#1 (Map.find(#tymap tytable, ty))))
+    handle NotFound => raise ERR "pp_const_dec: ty not found" s
   fun pp_sml_list pfun L =
     block INCONSISTENT 0
       (
@@ -358,13 +342,16 @@ fun pp_thydata info_record = let
     block CONSISTENT 0
     (pp_thid theory >> add_newline >> pp_sml_list pp_thid parents)
 
-  val pp_incorporate_types =
-    block CONSISTENT 0 (pp_sml_list pp_ty_dec type_ids)
+  fun pp_incorporate_types types =
+    block CONSISTENT 0 (pp_sml_list pp_ty_dec types)
 
-  val pp_incorporate_constants =
-    block CONSISTENT 0 (pp_sml_list pp_const_dec constant_ids)
+  fun pp_incorporate_constants constants =
+    block CONSISTENT 0 (pp_sml_list pp_const_dec constants)
 
   fun pparent (s,i,j) = Thry s
+  fun term_id msg tm = #1 (Map.find(#termmap tmtable, tm))
+    handle NotFound => raise ERR "term_id: tm not found" msg
+  fun pp_tm msg tm = add_string (Int.toString (term_id msg tm))
 
   fun pp_dep ((s,n),dl) =
   let
@@ -396,19 +383,20 @@ fun pp_thydata info_record = let
     pp_sml_list (add_string o mlquote) ocl
   end
 
-  fun pr_thm(s, tag, tm_ids) = let
+  fun pr_thm(s, th) = let
+    val (tag, asl, w) = (Thm.tag th, Thm.hyp th, Thm.concl th)
   in
     if is_temp_binding s then nothing
     else
       block CONSISTENT 0
         (add_string (mlquote s) >> add_newline >>
          pp_tag tag >> add_newline >>
-         pp_sml_list (add_string o Int.toString) tm_ids)
+         pp_sml_list (pp_tm s) (w::asl))
   end
 
   val pp_theorems =
     block CONSISTENT 0
-      (if null thml then nothing else pr_list pr_thm add_newline thm_ids)
+      (if null thml then nothing else pr_list pr_thm add_newline thml)
 
   fun pr_db (class,th) =
     block CONSISTENT 0
@@ -429,16 +417,16 @@ fun pp_thydata info_record = let
     if String.size s <= w then [s]
     else String.substring(s, 0, w) :: chunks w (String.extract(s, w, NONE))
 
-  fun pr_datapair (nm,data) =
+  fun pr_cpl (a,b) =
     block CONSISTENT 0
-      (add_string (stringify nm) >> add_break(1,0) >>
-       pr_list (add_string o stringify) (add_break (1,0)) (chunks 65 data))
+      (add_string (stringify a) >> add_break(1,0) >>
+       pr_list (add_string o stringify) (add_break (1,0)) (chunks 65 b))
 
   fun list_loadable tmwrite thymap =
     Binarymap.foldl (fn (k, data, rest) => (k, data tmwrite) :: rest)
       [] thymap
-  fun pr_loadable thydata_strings =
-    block CONSISTENT 0 (pp_sml_list pr_datapair thydata_strings)
+  fun pr_loadable tmwrite thymap =
+    block CONSISTENT 0 (pp_sml_list pr_cpl (list_loadable tmwrite thymap))
   val m =
     block CONSISTENT 0
       (
@@ -447,11 +435,11 @@ fun pp_thydata info_record = let
       add_string "IDS" >> add_newline >>
       lift theoryout_idtable idtable >> jump >>
       add_string "INCORPORATE_TYPES" >> add_newline >>
-      pp_incorporate_types >> jump >>
+      pp_incorporate_types types >> jump >>
       add_string "TYPES" >> add_newline >>
       lift theoryout_typetable tytable >> jump >>
       add_string "INCORPORATE_CONSTS" >> add_newline >>
-      pp_incorporate_constants >> jump >>
+      pp_incorporate_constants constants >> jump >>
       add_string "TERMS" >> add_newline >>
       lift theoryout_termtable tmtable >> jump >>
       add_string "THEOREMS" >> add_newline >>
@@ -459,7 +447,7 @@ fun pp_thydata info_record = let
       add_string "CLASSES" >> add_newline >>
       dblist () >> jump >>
       add_string "LOADABLE_THYDATA" >> add_newline >>
-      pr_loadable thydata_strings >> jump
+      pr_loadable (Int.toString o term_id "thydata") thydata >> jump
       )
 in
   mlower ": dat" m

@@ -10,6 +10,7 @@ open TheoryDat_Types TheoryDat_Reader
 NumList ::=  | <num> NumList
 NumCommaList1 ::= <num> ("," <num>)*
 BrStringList ::= '[' ']' | '[' <string> (',' <string>)* ']'
+BrNumList ::= '[' ']' | '[' NumCommaList1 ']'
 
 *)
 
@@ -86,13 +87,15 @@ fun BrStringList buf = (
     | _ => commafy1 parseString buf before require RBr buf
 )
 
+fun isNum (Num _) = true | isNum _ = false
+fun BrNumList buf = bracketed "BrNumList" (commafy isNum parseInt) buf
+
 (*
 ThyData ::= 'LOADABLE_THYDATA' '[' ThyDataElements ']'
 ThyDataElements ::= | ThyDataElement (',' ThyDataElement)*
 ThyDataElement ::= <string> <string>+
 *)
 fun isQString (QString _) = true | isQString _ = false
-fun isNum     (Num _)     = true | isNum     _ = false
 
 fun ThyDataElement buf =
     let
@@ -140,7 +143,7 @@ DepHead ::= <string> <num>
 Deps ::= Dep (',' Dep) *
 Dep ::= <string> NumList1
 Tags ::= BrStringList
-EncodedTerms ::= BrStringList
+EncodedTerms ::= BrNumList
 *)
 
 fun Dep buf = (parseString buf, list1 isNum parseInt buf)
@@ -167,12 +170,14 @@ fun Thm buf : encoded_thm =
       val nm = parseString buf
       val depi = DepInfo buf
       val tags = BrStringList buf
-      val tms = BrStringList buf
+      val tms = BrNumList buf
     in
       {name = nm, depinfo = depi, tagnames = tags, encoded_hypscon = tms}
     end
 val ThmList = list isQString Thm
 val Thms = tagged "THEOREMS" ThmList
+
+fun parseRef buf = {ThyId = parseInt buf, Id = parseInt buf}
 
 (*
 SharedTerms ::= 'TERMS' '[' TermList ']'
@@ -183,17 +188,30 @@ fun SharedTerm buf =
     case current buf of
         ID "TMV" => (
                       advance buf;
-                      SharingTables.TMV(parseString buf, parseInt buf)
+                      SharingTables.TMV(parseInt buf, parseInt buf)
                     )
       | ID "TMC" => (
                       advance buf;
-                      SharingTables.TMC (parseInt buf, parseInt buf)
+                      SharingTables.TMC (parseInt buf, parseInt buf, parseInt buf)
+                    )
+      | ID "TMAbs" => (
+                      advance buf;
+                      SharingTables.TMAbs (parseInt buf, parseInt buf)
+                    )
+      | ID "TMAp" => (
+                      advance buf;
+                      SharingTables.TMAp (parseInt buf, parseInt buf)
+                    )
+      | ID "TMRef" => (
+                      advance buf;
+                      SharingTables.TMRef (parseRef buf)
                     )
       | t => raise ParseError ("Expected SharingTerm op; saw " ^ toString t)
-fun first_SharedTerm t =
+fun first_is_ID ss t =
     case t of
-        ID s => s = "TMV" orelse s = "TMC"
+        ID s => Lib.mem s ss
       | _ => false
+val first_SharedTerm = first_is_ID ["TMV", "TMC", "TMAp", "TMAbs", "TMRef"]
 val TermList = commafy first_SharedTerm SharedTerm
 val SharedTerms = tagged "TERMS" (bracketed "TERMS" TermList)
 
@@ -201,21 +219,18 @@ val SharedTerms = tagged "TERMS" (bracketed "TERMS" TermList)
 NewConsts ::= 'INCORPORATE_CONSTS' '[' NewConstList ']'
 NewConstList ::= | <string> <num> (',' <string> <num>)*
 *)
-fun NewConst buf = (parseString buf, parseInt buf)
+fun NewConst buf = (parseInt buf, parseInt buf)
 val NewConsts =
     tagged "INCORPORATE_CONSTS"
-           (bracketed "INCORPORATE_CONSTS" (commafy isQString NewConst))
+           (bracketed "INCORPORATE_CONSTS" (commafy isNum NewConst))
 
 (*
 SharedTypes ::= 'TYPES' '[' TyList ']'
 TyList ::= | SharedType (',' SharedType)*
-SharedType ::= 'TYOP' <num> NumList | 'TYV' <string>
+SharedType ::= 'TYOP' <num> NumList | 'TYV' <string> | 'TYRef' <num> <num>
 *)
 
-fun first_SharedType t =
-    case t of
-        ID s => s = "TYOP" orelse s = "TYV"
-      | _ => false
+val first_SharedType = first_is_ID ["TYOP", "TYV", "TYRef"]
 fun SharedType buf =
     case current buf of
         ID "TYOP" => let val _ = advance buf
@@ -223,39 +238,41 @@ fun SharedType buf =
                      in
                        SharingTables.TYOP ns
                      end
-      | ID "TYV" => (advance buf; SharingTables.TYV (parseString buf))
+      | ID "TYV" => (advance buf; SharingTables.TYV (parseInt buf))
+      | ID "TYRef" => (advance buf; SharingTables.TYRef (parseRef buf))
       | t => raise ParseError ("Expected Sharing type; saw " ^ toString t)
 val SharedTypes =
     tagged "TYPES" (bracketed "TYPES" (commafy first_SharedType SharedType))
 
 (*
-IdVector ::= 'IDS' '[' IdList ']'
+SharedIds ::= 'IDS' '[' IdList ']'
 IdList ::=  | Id (',' Id)*
-Id ::= <string> <string>
+Id ::= 'IDStr' <string> " | 'IDRef' <num> <num>
 *)
 
+val first_Id = first_is_ID ["IDStr", "IDRef"]
 fun Id buf =
-    let val (thy,other) = (parseString buf, parseString buf)
-    in
-      {Thy = thy, Other = other}
-    end
-val IdVector =
-    Vector.fromList o tagged "IDS" (bracketed "IDS" (commafy isQString Id))
+    case current buf of
+        ID "IDStr" => (advance buf; SharingTables.IDStr (parseString buf))
+      | ID "IDRef" => (advance buf; SharingTables.IDRef (parseRef buf))
+      | t => raise ParseError ("Expected Sharing id; saw " ^ toString t)
+val SharedIds =
+    tagged "IDS" (bracketed "IDS" (commafy first_Id Id))
 
 (*
 NewTypes ::= 'INCORPORATE_TYPES' NewTypeList
-NewTypeList ::= '[' ']' | '[' <string> <num> (',' <string> <num>)* ']'
+NewTypeList ::= '[' ']' | '[' <num> <num> (',' <num> <num>)* ']'
 *)
-fun newtype buf = (parseString buf, parseInt buf)
+fun newtype buf = (parseInt buf, parseInt buf)
 val NewTypes =
     tagged "INCORPORATE_TYPES"
-           (bracketed "INCORPORATE_TYPES" (commafy isQString newtype))
+           (bracketed "INCORPORATE_TYPES" (commafy isNum newtype))
 
 
 (*
 datfile ::=
    'THEORY_AND_PARENTS' ThyName Parents
-   NewTypes IdVector SharedTypes NewConsts SharedTerms Thms
+   SharedIds NewTypes SharedTypes NewConsts SharedTerms Thms
    ClassInfo ThyData
 
 ThyName ::= <string> <num> <num>
@@ -271,8 +288,8 @@ fun raw_read_dat buf : dat_info =
       val _ = require (ID "THEORY_AND_PARENTS") buf
       val thyname = ThyName buf
       val parents = Parents buf
+      val shared_ids = SharedIds buf
       val new_types = NewTypes buf
-      val idvector = IdVector buf
       val shared_types = SharedTypes buf
       val new_consts = NewConsts buf
       val shared_terms = SharedTerms buf
@@ -281,7 +298,7 @@ fun raw_read_dat buf : dat_info =
       val thydata = ThyData buf
     in
       {thyname = thyname, parents = parents, new_types = new_types,
-       idvector = idvector, shared_types = shared_types,
+       shared_ids = shared_ids, shared_types = shared_types,
        new_consts = new_consts, shared_terms = shared_terms,
        theorems = theorems, classinfo = classinfo, thydata = thydata}
     end
