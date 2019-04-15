@@ -33,13 +33,17 @@ sig
   type termv = (Term.term * shared_term) Vector.vector
   type thy_name = string
   type vectors = {ids : idv, types : typev, terms : termv,
-                  parents : thy_name Vector.vector}
+                  sharing_parents : thy_name Vector.vector}
   val register_theory_vectors : string -> vectors -> unit
+  val peek_theory_vectors : string -> vectors
 
   (* set up tables to also share with previously loaded theories. *)
-  val setup_shared_tables : thy_name Vector.vector -> string list ->
+  val setup_shared_tables : thy_name list -> string list ->
                             Type.hol_type list -> Term.term list ->
                             (idtable * typetable * termtable)
+
+  (* canonical order of parent/ancestor theories for sharing *)
+  val get_share_parents : thy_name list -> thy_name Vector.vector
 
   val make_shared_string : string -> idtable -> (int * idtable)
 

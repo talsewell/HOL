@@ -307,7 +307,6 @@ fun pp_thydata info_record = let
        thydata = (thydata_tms, thydata), mldeps,
        axioms,definitions,theorems,types,constants,struct_ps} = info_record
   val share_parents = filter (fn "min" => false | _ => true) (map #1 parents0)
-    |> Vector.fromList
   val thml = axioms@definitions@theorems
   open SharingTables
 

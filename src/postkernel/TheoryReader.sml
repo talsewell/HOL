@@ -42,7 +42,7 @@ fun load_thydata thyname path =
          ...} = raw_data
     val _ = Theory.link_parents fullthy parents
     val share_parents = filter (fn "min" => false | _ => true) (map #1 parents)
-      |> Vector.fromList
+      |> get_share_parents
     val idvector = build_id_vector share_parents (#shared_ids raw_data)
     fun get_id i = #1 (Vector.sub (idvector, i))
     val _ = Theory.incorporate_types thyname (map (Lib.apfst get_id) new_types)
@@ -56,7 +56,7 @@ fun load_thydata thyname path =
     val named_thms = map (read_thm tmvector) (#theorems raw_data)
 
     val v = {ids = idvector, types = tyvector, terms = tmvector,
-             parents = share_parents}
+             sharing_parents = share_parents}
     val _ = register_theory_vectors thyname v
 
     val thmdict = Redblackmap.fromList String.compare named_thms
