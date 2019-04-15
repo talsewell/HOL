@@ -126,11 +126,14 @@ fun scan_parent_wrapper (v : 'a Vector.vector)
 
 fun if_upd b f x = (b, if b then f x else x)
 
+fun share_all () = Option.isSome (Portable.getEnv "HOL4_SHARE_NO_SCAN")
+
 fun share_parent_ids thy_id arrs ss (idv : idv) tab = let
     fun arrs_ref r = Array.sub (Vector.sub (arrs, #ThyId r), #Id r)
     val add = case thy_id of NONE => Lib.K Lib.I | SOME i => add_thy_id i
+    val all = share_all ()
     fun f (_, _, (_, IDRef r), tab) = (arrs_ref r, tab)
-      | f (_, i, (s, IDStr _), tab) = if_upd (Set.member (ss, s))
+      | f (_, i, (s, IDStr _), tab) = if_upd (all orelse Set.member (ss, s))
         (add (i, s)) tab
   in scan_parent_wrapper idv f tab end
 
@@ -227,8 +230,9 @@ fun add_thy_ty thy_id (idn, ty) (tab : typetable)
 fun share_parent_tys thy_id id_arr arrs tys (typev : typev) tab = let
     fun arrs_ref r = Array.sub (Vector.sub (arrs, #ThyId r), #Id r)
     val add = case thy_id of NONE => Lib.K Lib.I | SOME i => add_thy_ty i
-    fun ifu rs idn ty = if_upd
-        (List.all Array.sub rs andalso Set.member (tys, ty)) (add (idn, ty))
+    val all = share_all ()
+    fun ifu rs idn ty = if_upd (all orelse
+        (List.all Array.sub rs andalso Set.member (tys, ty))) (add (idn, ty))
     fun f (_, _, (_, TYRef r), tab) = (arrs_ref r, tab)
       | f (_, idn, (ty, TYV i), tab) = ifu [(id_arr, i)] idn ty tab
       | f (arr, idn, (ty, TYOP (thy_id :: nm_id :: args)), tab) = ifu
@@ -369,8 +373,9 @@ fun add_thy_tm thy_id (idn, tm) (tab : termtable)
 fun share_parent_tms thy_id id_arr ty_arr arrs tms (termv : termv) tab = let
     fun arrs_ref r = Array.sub (Vector.sub (arrs, #ThyId r), #Id r)
     val add = case thy_id of NONE => Lib.K Lib.I | SOME i => add_thy_tm i
-    fun ifu rs idn tm = if_upd
-        (List.all Array.sub rs andalso Set.member (tms, tm)) (add (idn, tm))
+    val all = share_all ()
+    fun ifu rs idn tm = if_upd (all orelse
+        (List.all Array.sub rs andalso Set.member (tms, tm))) (add (idn, tm))
     fun f (_, _, (_, TMRef r), tab) = (arrs_ref r, tab)
       | f (_, idn, (tm, TMV (i, j)), tab) = ifu [(id_arr, i), (ty_arr, j)]
                 idn tm tab
