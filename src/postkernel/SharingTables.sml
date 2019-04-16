@@ -420,7 +420,7 @@ fun add_terms [] (tmset, tyset, ss) = (tmset, tyset, ss)
   in add_terms tms (Set.add (tmset, tm), tyset, ss) end
   else let
     val (x, y) = if is_comb tm then dest_comb tm else dest_abs tm
-  in add_terms (x :: y :: tms) (tmset, tyset, ss) end
+  in add_terms (x :: y :: tms) (Set.add (tmset, tm), tyset, ss) end
 
 (* ----------------------------------------------------------------------
     Toplevel
