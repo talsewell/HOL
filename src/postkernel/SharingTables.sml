@@ -135,18 +135,20 @@ fun scan_parent_wrapper (v : 'a Vector.vector)
         val (useful, acc) = f (arr, i, x, acc)
         val _ = if useful then Array.update (arr, i, true) else ()
       in acc end
-    val acc = Vector.foldri g acc v
+    val acc = Vector.foldli g acc v
   in (arr, acc) end
 
 fun if_upd b f x = (b, if b then f x else x)
-
-fun share_all () = Option.isSome (Portable.getEnv "HOL4_SHARE_NO_SCAN")
+fun do_check () = Option.isSome (Portable.getEnv "HOL4_CHECK_SCAN")
+fun check_ref check r el to_str s = if not check then r
+  else if r = Set.member (s, el) then r
+  else raise ERR "check_ref" ( to_str el )
 
 fun share_parent_ids thy_id arrs ss (idv : idv) tab = let
     fun arrs_ref r = Array.sub (Vector.sub (arrs, #ThyId r), #Id r)
-    val all = share_all ()
-    fun f (_, _, (_, IDRef r), tab) = (arrs_ref r, tab)
-      | f (_, i, (s, IDStr _), tab) = if_upd (all orelse Set.member (ss, s))
+    val check = check_ref (do_check ())
+    fun f (_, _, (s, IDRef r), tab) = (check (arrs_ref r) s Lib.I ss, tab)
+      | f (_, i, (s, IDStr _), tab) = if_upd (Set.member (ss, s))
         (add_thy_id thy_id (i, s)) tab
   in scan_parent_wrapper idv f tab end
 
@@ -240,13 +242,18 @@ fun add_thy_ty thy_id (idn, ty) (tab : typetable)
     = update_ty_map (fn NONE => (idn, SOME thy_id) | SOME v => raise NoUpdate)
         ty tab
 
+fun check_scan msg check refs idn el s = if check andalso Set.member (s, el)
+  then List.all Array.sub refs
+    orelse raise ERR "check_scan" (msg ^ " #" ^ Int.toString idn)
+  else if check then false
+  else List.all Array.sub refs andalso Set.member (s, el)
+
 fun share_parent_tys thy_id id_arr arrs tys (typev : typev) tab = let
     fun arrs_ref r = Array.sub (Vector.sub (arrs, #ThyId r), #Id r)
-    val all = share_all ()
-    fun ifu rs idn ty = if_upd (all orelse
-        (List.all Array.sub rs andalso Set.member (tys, ty)))
+    val check = check_scan "share_parent_tys" (do_check ())
+    fun ifu rs idn ty = if_upd (check rs idn ty tys)
         (add_thy_ty thy_id (idn, ty))
-    fun f (_, _, (_, TYRef r), tab) = (arrs_ref r, tab)
+    fun f (_, _, (ty, TYRef r), tab) = (arrs_ref r, tab)
       | f (_, idn, (ty, TYV i), tab) = ifu [(id_arr, i)] idn ty tab
       | f (arr, idn, (ty, TYOP (thy_id :: nm_id :: args)), tab) = ifu
             ([(id_arr, thy_id), (id_arr, nm_id)] @ map (Lib.pair arr) args)
@@ -385,9 +392,8 @@ fun add_thy_tm thy_id (idn, tm) (tab : termtable)
 
 fun share_parent_tms thy_id id_arr ty_arr arrs tms (termv : termv) tab = let
     fun arrs_ref r = Array.sub (Vector.sub (arrs, #ThyId r), #Id r)
-    val all = share_all ()
-    fun ifu rs idn tm = if_upd (all orelse
-        (List.all Array.sub rs andalso Set.member (tms, tm)))
+    val check = check_scan "share_parent_tms" (do_check ())
+    fun ifu rs idn tm = if_upd (check rs idn tm tms)
         (add_thy_tm thy_id (idn, tm))
     fun f (_, _, (_, TMRef r), tab) = (arrs_ref r, tab)
       | f (_, idn, (tm, TMV (i, j)), tab) = ifu [(id_arr, i), (ty_arr, j)]
@@ -405,7 +411,7 @@ fun add_terms [] (tmset, tyset, ss) = (tmset, tyset, ss)
   then let
     val (nm, ty) = dest_var tm
     val (tyset, ss) = add_types [ty] (tyset, ss)
-  in add_terms tms (Set.add (tmset, tm), tyset, ss) end
+  in add_terms tms (Set.add (tmset, tm), tyset, Set.add (ss, nm)) end
   else if is_const tm
   then let
     val {Name, Thy, Ty} = dest_thy_const tm
@@ -421,6 +427,7 @@ fun add_terms [] (tmset, tyset, ss) = (tmset, tyset, ss)
    ---------------------------------------------------------------------- *)
 
 fun setup_shared_tables parent_thys ss tys tms = let
+    val orig_ss = ss
     val ss = Set.fromList String.compare ss
     val (tyset, ss) = add_types tys (Set.empty Type.compare, ss)
     val (tmset, tyset, ss) = add_terms tms (Set.empty term_compare, tyset, ss)
@@ -436,6 +443,8 @@ fun setup_shared_tables parent_thys ss tys tms = let
     fun doit (i, thy_id, tabs) = let
         val vectors = lookup_vectors thy_id
         val parent_ids = map find_id (vec_to_list (#sharing_parents vectors))
+        val _ = Lib.all (fn j => j < i) parent_ids
+            orelse raise ERR "setup_shared: parent_ids" thy_id
         val (id_tab, ty_tab, tm_tab) = tabs
         val (id_arr, id_tab) = share_parent_ids i (gather id_arrs parent_ids)
             ss (#ids vectors) id_tab
@@ -444,10 +453,11 @@ fun setup_shared_tables parent_thys ss tys tms = let
             (gather ty_arrs parent_ids) tyset (#types vectors) ty_tab
         val _ = Array.update (ty_arrs, i, ty_arr)
         val (tm_arr, tm_tab) = share_parent_tms i id_arr ty_arr
-            (gather ty_arrs parent_ids) tmset (#terms vectors) tm_tab
+            (gather tm_arrs parent_ids) tmset (#terms vectors) tm_tab
+        val _ = Array.update (tm_arrs, i, tm_arr)
       in (id_tab, ty_tab, tm_tab) end
     val tabs = (empty_idtable, empty_tytable, empty_termtable)
-    val tabs = Vector.foldri doit tabs parents
+    val tabs = Vector.foldli doit tabs parents
     val tabs = List.foldl (fn (tm, tabs) => #2 (make_shared_term tm tabs))
         tabs tms
     val (idtable, tytable, termtable) = tabs
@@ -455,7 +465,7 @@ fun setup_shared_tables parent_thys ss tys tms = let
         val (_, idtable, tytable) = make_shared_type ty idtable tytable
       in (idtable, tytable) end) (idtable, tytable) tys
     val idtable = List.foldl (fn (s, tab) => #2 (make_shared_string s tab))
-        idtable (Set.listItems ss)
+        idtable orig_ss
   in (idtable, tytable, termtable) end
 
 end; (* struct *)
