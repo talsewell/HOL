@@ -314,17 +314,16 @@ fun pp_thydata info_record = let
   val tys = map snd constants
   fun thm_tms thm = Thm.concl thm :: Thm.hyp thm
   val tms = thydata_tms @ List.concat (map (thm_tms o #2) thml)
-  val (idtable, tytable, tmtable) = setup_shared_tables share_parents ss tys tms
+  val (iddata, tydata, tmdata) = share_values share_parents ss tys tms
+
+  val types_ids = zip types (List.take (snd iddata, length types))
+  val constants_ids = zip (List.drop (snd iddata, length types)) (snd tydata)
 
   val jump = add_newline >> add_newline
-  fun string_id s = Int.toString (#1 (Map.find(#idmap idtable, s)))
-    handle NotFound => raise ERR "string_id" s
-  fun pp_ty_dec (s,n) =
-      add_string (string_id s ^ " " ^ Int.toString n)
-  fun pp_const_dec (s, ty) =
-      add_string (string_id s ^ " " ^
-                  Int.toString (#1 (Map.find(#tymap tytable, ty))))
-    handle NotFound => raise ERR "pp_const_dec: ty not found" s
+  fun pp_ty_dec ((_,n),s_id) =
+      add_string (Int.toString s_id ^ " " ^ Int.toString n)
+  fun pp_const_dec (s_id,ty_id) =
+      add_string (Int.toString s_id ^ " " ^ Int.toString ty_id)
   fun pp_sml_list pfun L =
     block INCONSISTENT 0
       (
@@ -341,16 +340,17 @@ fun pp_thydata info_record = let
     block CONSISTENT 0
     (pp_thid theory >> add_newline >> pp_sml_list pp_thid parents)
 
-  fun pp_incorporate_types types =
-    block CONSISTENT 0 (pp_sml_list pp_ty_dec types)
+  val pp_incorporate_types =
+    block CONSISTENT 0 (pp_sml_list pp_ty_dec types_ids)
 
-  fun pp_incorporate_constants constants =
-    block CONSISTENT 0 (pp_sml_list pp_const_dec constants)
+  val pp_incorporate_constants =
+    block CONSISTENT 0 (pp_sml_list pp_const_dec constants_ids)
 
   fun pparent (s,i,j) = Thry s
-  fun term_id msg tm = #1 (Map.find(#termmap tmtable, tm))
+  val thydata_tm_map = Map.fromList term_compare
+           (zip thydata_tms (List.take (snd tmdata, length thydata_tms)))
+  fun term_id msg tm = Map.find (thydata_tm_map, tm)
     handle NotFound => raise ERR "term_id: tm not found" msg
-  fun pp_tm msg tm = add_string (Int.toString (term_id msg tm))
 
   fun pp_dep ((s,n),dl) =
   let
@@ -382,20 +382,29 @@ fun pp_thydata info_record = let
     pp_sml_list (add_string o mlquote) ocl
   end
 
-  fun pr_thm(s, th) = let
-    val (tag, asl, w) = (Thm.tag th, Thm.hyp th, Thm.concl th)
+  fun proc_thml [] [] = []
+    | proc_thml [] ids = raise ERR "proc_thml" "remaining ids"
+    | proc_thml ((s, th) :: thml) ids = let
+      val n = length (Thm.hyp th) + 1
+      val th_ids = List.take (ids, n)
+      val ids = List.drop (ids, n)
+     in (s, th, th_ids) :: proc_thml thml ids end
+  val thml2 = proc_thml thml (List.drop (snd tmdata, length thydata_tms))
+
+  fun pr_thm(s, th, ids) = let
+    val tag = Thm.tag th
   in
     if is_temp_binding s then nothing
     else
       block CONSISTENT 0
         (add_string (mlquote s) >> add_newline >>
          pp_tag tag >> add_newline >>
-         pp_sml_list (pp_tm s) (w::asl))
+         pp_sml_list (add_string o Int.toString) ids)
   end
 
   val pp_theorems =
     block CONSISTENT 0
-      (if null thml then nothing else pr_list pr_thm add_newline thml)
+      (if null thml2 then nothing else pr_list pr_thm add_newline thml2)
 
   fun pr_db (class,th) =
     block CONSISTENT 0
@@ -432,15 +441,15 @@ fun pp_thydata info_record = let
       add_string "THEORY_AND_PARENTS" >> add_newline >>
       pp_thid_and_parents theory parents0 >> jump >>
       add_string "IDS" >> add_newline >>
-      lift theoryout_idtable idtable >> jump >>
+      lift theoryout_idtable (fst iddata) >> jump >>
       add_string "INCORPORATE_TYPES" >> add_newline >>
-      pp_incorporate_types types >> jump >>
+      pp_incorporate_types >> jump >>
       add_string "TYPES" >> add_newline >>
-      lift theoryout_typetable tytable >> jump >>
+      lift theoryout_typetable (fst tydata) >> jump >>
       add_string "INCORPORATE_CONSTS" >> add_newline >>
-      pp_incorporate_constants constants >> jump >>
+      pp_incorporate_constants >> jump >>
       add_string "TERMS" >> add_newline >>
-      lift theoryout_termtable tmtable >> jump >>
+      lift theoryout_termtable (fst tmdata) >> jump >>
       add_string "THEOREMS" >> add_newline >>
       pp_theorems >> jump >>
       add_string "CLASSES" >> add_newline >>
