@@ -300,8 +300,7 @@ fun finalise_shared refs (t : uniqtable) req = let
     val state = Map.foldl sh_id state (#strings t)
     fun fin i = let
         val j = Array.sub (fin_arr, i)
-      in if j = ~1 then raise ERR "fin" (PolyML.makestring (fin_arr, i))
-        else j end
+      in if j = ~1 then raise ERR "fin" (Int.toString i) else j end
     fun fin_sh_tm (TMV (i, j)) = TMV (fin i, fin j)
       | fin_sh_tm (TMAp (i, j)) = TMAp (fin i, fin j)
       | fin_sh_tm (TMAbs (i, j)) = TMAbs (fin i, fin j)
@@ -311,9 +310,11 @@ fun finalise_shared refs (t : uniqtable) req = let
       | fin_sh_ty (TYV i) = TYV (fin i)
       | fin_sh_ty (TYRef _) = raise ERR "fin_sh_ty" "TYRef unexpected"
     fun sh_val ((i, v), st) = if Array.sub (req, i) then let
-        val (n, st) = case v of
-            TypeID sh_ty => ty (fin_sh_ty sh_ty) st
-          | TermID sh_tm => tm (fin_sh_tm sh_tm) st
+        val (n, st) = case (Array.sub (refs, i), v) of
+            (SOME r, TypeID _) => ty (TYRef r) st
+          | (SOME r, TermID _) => tm (TMRef r) st
+          | (NONE, TypeID sh_ty) => ty (fin_sh_ty sh_ty) st
+          | (NONE, TermID sh_tm) => tm (fin_sh_tm sh_tm) st
       in Array.update (fin_arr, i, n); st end
       else st
     val ((_, ids), (_, tys), (_, tms)) = List.foldr sh_val state (#vals t)
@@ -441,12 +442,26 @@ fun theoryout_termtable (termlist : shared_term list) =
     Toplevel Encoding
    ---------------------------------------------------------------------- *)
 
+fun check parent_thys ss tys tms ss_data ty_data tm_data = let
+    val idv = build_id_vector parent_thys (#1 ss_data)
+    val tyv = build_type_vector parent_thys idv (#1 ty_data)
+    val tmv = build_term_vector parent_thys idv tyv (#1 tm_data)
+    fun check [] = ()
+      | check ((tm, tm_id) :: ts) = let
+        val (tm2, _) = Vector.sub (tmv, tm_id)
+      in
+        Term.term_eq tm2 tm orelse raise ERR "check_tm" (Int.toString tm_id);
+        check ts
+      end
+  in check (Lib.zip tms (#2 tm_data)) end
+
 fun share_values parent_thys ss tys tms = let
     val t = empty_uniqtable
-    val _ = print "Doing share_values"
+    val _ = print "Doing share_values.\n"
     val (t, s_ids) = Lib.foldl_map (Lib.uncurry encode_string) (t, ss)
     val _ = print ("Encoded s_ids, uniqtable size: " ^ Int.toString (#nextid t) ^ "\n")
     val (t, ty_ids) = Lib.foldl_map type_id (t, tys)
+    val _ = print ("Encoded tys, uniqtable size: " ^ Int.toString (#nextid t) ^ "\n")
     val (t, tm_ids) = Lib.foldl_map term_id (t, tms)
     val _ = print ("Encoded values, uniqtable size: " ^ Int.toString (#nextid t) ^ "\n")
     val parents = get_share_parents parent_thys
@@ -454,13 +469,11 @@ fun share_values parent_thys ss tys tms = let
     val req = get_required refs t [s_ids, ty_ids, tm_ids]
     val (sh_ids, sh_tys, sh_tms, fin_arr) = finalise_shared refs t req
     val finl = map (Lib.curry Array.sub fin_arr)
+    val ss_data = (sh_ids, finl s_ids)
+    val ty_data = (sh_tys, finl ty_ids)
+    val tm_data = (sh_tms, finl tm_ids)
     (* checking *)
-    val parent_vv = mk_vv parents
-    val s_lookup = Lib.curry Vector.sub (Vector.fromList sh_ids)
-    fun check_str s (IDStr s2) = s = s2
-      | check_str s (IDRef r) = (#1 (lookup_vv parent_vv (#ids) r) = s)
-    val _ = Lib.all2 check_str ss (map s_lookup (finl s_ids))
-        orelse raise ERR "check_str" "disagreement"
-  in ((sh_ids, finl s_ids), (sh_tys, finl ty_ids), (sh_tms, finl tm_ids)) end
+    val _ = check parents ss tys tms ss_data ty_data tm_data
+  in (ss_data, ty_data, tm_data) end
 
 end; (* struct *)
