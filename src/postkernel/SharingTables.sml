@@ -116,10 +116,11 @@ fun encode_string (t : uniqtable) s = let
 
 fun lookup_string (t : uniqtable) s = Redblackmap.find (#strings t, s)
 
-fun encode_tuple (t : uniqtable) tup = let
+fun encode_tuple (t : uniqtable) tup v = let
     val {nextid, strings, tuples, vals} = t
     fun upd NONE = nextid | upd (SOME id) = raise (HasID id)
     val map = Map.update (tuples, tup, upd)
+    val vals = case v of NONE => vals | SOME v2 => (nextid, v2) :: vals
   in ({nextid = next_uniq_id nextid, strings = strings, tuples = map,
        vals = vals}, nextid)
   end handle HasID id => (t, id)
@@ -128,11 +129,11 @@ fun lookup_tuple _ (~1, _, _) = raise Map.NotFound
   | lookup_tuple _ (_, ~1, _) = raise Map.NotFound
   | lookup_tuple (t : uniqtable) tup = Redblackmap.find (#tuples t, tup)
 
-fun encode_ntuple t k [x, y] = encode_tuple t (x, y, k)
-  | encode_ntuple t k (x :: y :: zs) = let
-    val (t, id) = encode_tuple t (x, y, k)
-  in encode_ntuple t k (id :: zs) end
-  | encode_ntuple _ _ _ = raise ERR "encode_ntuple" "assumes 2+ elements"
+fun encode_ntuple t k v [x, y] = encode_tuple t (x, y, k) v
+  | encode_ntuple t k v (x :: y :: zs) = let
+    val (t, id) = encode_tuple t (x, y, k) NONE
+  in encode_ntuple t k v (id :: zs) end
+  | encode_ntuple _ _ _ _ = raise ERR "encode_ntuple" "assumes 2+ elements"
 
 fun lookup_ntuple t k [x, y] = lookup_tuple t (x, y, k)
   | lookup_ntuple t k (x :: y :: zs)
@@ -145,8 +146,6 @@ fun add_value v (t : uniqtable, n) = let
        vals = (n, v) :: vals}, n)
   end
 
-fun encode_tuple_val v t tup = add_value v (encode_tuple t tup)
-
 (* ----------------------------------------------------------------------
     Encoding Phase 1: Assign unique IDs to elements
    ---------------------------------------------------------------------- *)
@@ -156,14 +155,14 @@ fun replicate n v = map (fn _ => v) (Lib.upto 1 n)
 fun type_id (t : uniqtable, typ) = if is_vartype typ
   then let
     val (t, s_id) = encode_string t (dest_vartype typ)
-  in encode_tuple_val (TypeID (TYV s_id)) t (s_id, s_id, TYVKind) end
+  in encode_tuple t (s_id, s_id, TYVKind) (SOME (TypeID (TYV s_id))) end
   else let
     val {Thy, Tyop, Args} = dest_thy_type typ
     val (t, thy_id) = encode_string t Thy
     val (t, op_id) = encode_string t Tyop
     val (t, arg_ids) = Lib.foldl_map type_id (t, Args)
-  in add_value (TypeID (TYOP (thy_id :: op_id :: arg_ids)))
-    (encode_ntuple t TYOPKind (thy_id :: op_id :: arg_ids)) end
+    val id_list = thy_id :: op_id :: arg_ids
+  in encode_ntuple t TYOPKind (SOME (TypeID (TYOP id_list))) id_list end
 
 fun term_id (t : uniqtable, term) = if is_var term
   then let
@@ -171,28 +170,30 @@ fun term_id (t : uniqtable, term) = if is_var term
     val (t, nm_id) = encode_string t nm
     val (t, ty_id) = type_id (t, typ)
   in
-    encode_tuple_val (TermID (TMV (nm_id, ty_id))) t (nm_id, ty_id, TMVKind)
+    encode_tuple t (nm_id, ty_id, TMVKind) (SOME (TermID (TMV (nm_id, ty_id))))
   end
   else if is_const term then let
     val {Thy, Name, Ty} = dest_thy_const term
     val (t, thy_id) = encode_string t Thy
     val (t, nm_id) = encode_string t Name
     val (t, ty_id) = type_id (t, Ty)
-    val (t, id) = encode_ntuple t TMCKind [ty_id, thy_id, nm_id]
-  in add_value (TermID (TMC (thy_id, nm_id, ty_id))) (t, id) end
+  in
+    encode_ntuple t TMCKind (SOME (TermID (TMC (thy_id, nm_id, ty_id))))
+        [ty_id, thy_id, nm_id]
+  end
   else if is_comb term then let
     val (f, x) = dest_comb term
     val (t, f_id) = term_id (t, f)
     val (t, x_id) = term_id (t, x)
   in
-    encode_tuple_val (TermID (TMAp (f_id, x_id))) t (f_id, x_id, TMApKind)
+    encode_tuple t (f_id, x_id, TMApKind) (SOME (TermID (TMAp (f_id, x_id))))
   end
   else (* must be an abstraction *) let
     val (v, body) = dest_abs term
     val (t, v_id) = term_id (t, v)
     val (t, b_id) = term_id (t, body)
   in
-    encode_tuple_val (TermID (TMAbs (v_id, b_id))) t (v_id, b_id, TMAbsKind)
+    encode_tuple t (v_id, b_id, TMAbsKind) (SOME (TermID (TMAbs (v_id, b_id))))
   end
 
 (* ----------------------------------------------------------------------
@@ -285,6 +286,15 @@ fun get_required refs (t : uniqtable) reqss = let
       in Array.update (req, n, true); f (xs @ ns) end
   in app f reqss; req end
 
+fun sh_compound refs = let
+    fun atom (TMAbs (_, _)) = false
+      | atom (TMAp (_, _)) = false
+      | atom _ = true
+    fun is_ref id = Option.isSome (Array.sub (refs, id))
+    fun c (_, TypeID _) = false
+      | c (id, TermID sh_tm) = not (atom sh_tm orelse is_ref id)
+  in c end
+
 fun finalise_shared refs (t : uniqtable) req = let
     val state = ((0, []), (0, []), (0, []))
     fun id v ((n, ids), tys, tms) = (n, ((n + 1, v :: ids), tys, tms))
@@ -317,7 +327,8 @@ fun finalise_shared refs (t : uniqtable) req = let
           | (NONE, TermID sh_tm) => tm (fin_sh_tm sh_tm) st
       in Array.update (fin_arr, i, n); st end
       else st
-    val ((_, ids), (_, tys), (_, tms)) = List.foldr sh_val state (#vals t)
+    val (comp, others) = Lib.partition (sh_compound refs) (#vals t)
+    val ((_, ids), (_, tys), (_, tms)) = List.foldr sh_val state (comp @ others)
   in (rev ids, rev tys, rev tms, fin_arr) end
 
 (* ----------------------------------------------------------------------
