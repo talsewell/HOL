@@ -350,6 +350,28 @@ in
   stdprint (mlower ppaction)
 end
 
+fun get_unify_error_msg ty ty2 = let
+    open Pretype errormonad
+  in case unify (fromType ty) (fromType ty2) Env.empty of
+    Error (e, _) => typecheck_error.errorMsg e
+  | Some _ => "Success"
+  end
+
+fun get_overload_error o_info nm ty = case Overload.info_for_name o_info nm of
+    NONE => "get_overload_error: " ^ nm ^ " not overloaded"
+  | SOME o_data => let
+    val msgs = map (fn t => #Thy (dest_thy_const t) ^ "$" ^ nm ^ ":\n"
+            ^ get_unify_error_msg (type_of t) ty ^ "\n\n")
+        (filter is_const (#actual_ops o_data))
+  in concat msgs end
+
+fun print_overload_error nm ty = print (get_overload_error
+    (term_grammar.overload_info (!the_term_grammar)) nm ty)
+
+fun print_last_overload_error () = let
+    val (nm, ty) = typecheck_error.last_impossible_overload ()
+  in print_overload_error nm ty end
+
 fun pp_term_without_overloads_on ls t = let
   fun remove s = #1 o term_grammar.mfupdate_overload_info
                         (Overload.remove_overloaded_form s)

@@ -8,17 +8,27 @@ struct
          | OvlFail
          | Misc of string
 
+  local
+  val last_overload_ref = ref ("", Type.bool)
+  in
+
   type error = tcheck_error * locn.locn
   fun errorMsg tc =
     case tc of
         ConstrainFail (_,_,msg) => msg
       | AppFail (_,_,msg) => msg
-      | OvlNoType(s,_) =>
-        ("Couldn't infer type for overloaded name "^s)
+      | OvlNoType(s,t) =>
+        (last_overload_ref := (s, t);
+            "Couldn't infer type for overloaded name "^s^
+            "  (try Parse.print_last_overload_error ())")
       | OvlFail => "Overloading constraints were unsatisfiable"
       | OvlTooMany =>
           "There was more than one resolution of overloaded constants"
       | Misc s => s
+
+  fun last_impossible_overload () = (! last_overload_ref)
+
+  end (* local *)
 
   local
     open Feedback

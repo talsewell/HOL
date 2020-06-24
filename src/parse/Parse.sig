@@ -129,6 +129,10 @@ signature Parse = sig
   (* information about overloads and abbreviations;
      call interactively for information printed to stdout *)
   val overload_info_for : string -> unit
+  val get_overload_error : Overload.overload_info -> string -> hol_type ->
+    string
+  val print_overload_error : string -> hol_type -> unit
+  val print_last_overload_error : unit -> unit
 
   (* printing without overloads or abbreviations *)
   val pp_term_without_overloads_on : string list -> term pprinter
